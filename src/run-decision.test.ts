@@ -10,6 +10,9 @@ function snapshot(overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnap
     changedPaths: ["src/app.ts"],
     newCommitMessages: ["add feature"],
     overrideFile: null,
+    publishedDocs: { overview: null, architecture: null, glossary: null },
+    lessonsFile: null,
+    files: [],
     ...overrides,
   }
 }
@@ -271,6 +274,617 @@ test("a lessons change still wakes when ignore would skip that path", () => {
   const overrideFile = "ignore:\n  - docs/**\n"
   assert.deepEqual(decideRun(snapshot({ changedPaths: ["docs/lessons.md"], overrideFile })), woken)
   assert.deepEqual(decideRun(snapshot({ changedPaths: ["docs/notes.md"], overrideFile })), skipped)
+})
+
+test("a usable proposal commits the changed published section and names its source", () => {
+  const overview = "# What it does\n\nSends mail.\n\n# Entry points\n\nnode src/main.ts\n"
+  const outcome = decideRun(
+    snapshot({
+      publishedDocs: {
+        overview,
+        architecture: "# Parts\n\nnone is shown\n\n# Relationships\n\nnone is shown\n\n# Data\n\nnone is shown\n",
+        glossary: "# Mailer\n\nSends mail.\n",
+      },
+      files: [{ path: "src/billing.ts", text: "export function bill() { return 1 }" }],
+    }),
+    {
+      sections: [
+        {
+          doc: "overview",
+          heading: "What it does",
+          body: "Bills the account when an invoice is issued.",
+          source: "src/billing.ts",
+        },
+      ],
+    },
+  )
+
+  assert.equal(outcome.invokeModel, false)
+  assert.equal(outcome.comment, null)
+  assert.deepEqual(outcome.check, {
+    name: "DocAtlas",
+    state: "green",
+    summary: "What it does: src/billing.ts",
+  })
+  assert.deepEqual(outcome.commit, {
+    message: "docs: update for this pull request",
+    files: [
+      {
+        path: "docs/overview.md",
+        text: "# What it does\n\nBills the account when an invoice is issued.\n\n# Entry points\n\nnode src/main.ts\n",
+      },
+    ],
+  })
+})
+
+test("missing published docs are created with the full outline and lessons and the override are not created", () => {
+  const outcome = decideRun(
+    snapshot({
+      publishedDocs: { overview: null, architecture: null, glossary: null },
+      lessonsFile: null,
+      overrideFile: null,
+      files: [{ path: "src/main.ts", text: "console.log('up')" }],
+    }),
+    {
+      sections: [
+        {
+          doc: "overview",
+          heading: "Entry points",
+          body: "node src/main.ts",
+          source: "src/main.ts",
+        },
+      ],
+    },
+  )
+
+  assert.equal(outcome.comment, null)
+  assert.equal(outcome.check.state, "green")
+  assert.deepEqual(outcome.commit, {
+    message: "docs: update for this pull request",
+    files: [
+      {
+        path: "docs/overview.md",
+        text: "# What it does\n\nnone is shown\n\n# Entry points\n\nnode src/main.ts\n",
+      },
+      {
+        path: "docs/architecture.md",
+        text: "# Parts\n\nnone is shown\n\n# Relationships\n\nnone is shown\n\n# Data\n\nnone is shown\n",
+      },
+      {
+        path: "docs/glossary.md",
+        text: "none is shown\n",
+      },
+    ],
+  })
+})
+
+test("subsections under Parts are added and removed only when each cites a resolved source", () => {
+  const architecture = [
+    "# Parts",
+    "",
+    "The system parts.",
+    "",
+    "## api",
+    "",
+    "The API package.",
+    "",
+    "# Relationships",
+    "",
+    "none is shown",
+    "",
+    "# Data",
+    "",
+    "none is shown",
+    "",
+  ].join("\n")
+  const outcome = decideRun(
+    snapshot({
+      publishedDocs: {
+        overview: "# What it does\n\nnone is shown\n\n# Entry points\n\nnone is shown\n",
+        architecture,
+        glossary: "none is shown\n",
+      },
+      lessonsFile: "# Name the billing package\n\nThe folder is the billing package.\n",
+      files: [
+        { path: "src/workspace.ts", text: "export const packages = ['web', 'billing']" },
+        { path: "packages/web/package.json", text: '{ "name": "web" }' },
+        { path: "packages/api/package.json", text: "" },
+      ],
+    }),
+    {
+      sections: [
+        {
+          doc: "architecture",
+          heading: "Parts",
+          body: [
+            "The system parts.",
+            "",
+            "## web",
+            "",
+            "The web package.",
+            "",
+            "## billing",
+            "",
+            "The billing package.",
+            "",
+            "## ghost",
+            "",
+            "Not a package.",
+          ].join("\n"),
+          source: "src/workspace.ts",
+          subsectionSources: [
+            { heading: "web", source: "packages/web/package.json" },
+            { heading: "billing", source: "Name the billing package" },
+            { heading: "api", source: "packages/api/package.json" },
+          ],
+        },
+      ],
+    },
+  )
+
+  assert.equal(outcome.comment, null)
+  assert.deepEqual(outcome.check, {
+    name: "DocAtlas",
+    state: "green",
+    summary: [
+      "web: packages/web/package.json",
+      "billing: Name the billing package",
+      "api: packages/api/package.json",
+    ].join("\n"),
+  })
+  assert.deepEqual(outcome.commit, {
+    message: "docs: update for this pull request",
+    files: [
+      {
+        path: "docs/architecture.md",
+        text: [
+          "# Parts",
+          "",
+          "The system parts.",
+          "",
+          "## web",
+          "",
+          "The web package.",
+          "",
+          "## billing",
+          "",
+          "The billing package.",
+          "",
+          "# Relationships",
+          "",
+          "none is shown",
+          "",
+          "# Data",
+          "",
+          "none is shown",
+          "",
+        ].join("\n"),
+      },
+    ],
+  })
+})
+
+test("a resolved section source replaces an existing subsection body as a whole", () => {
+  const architecture = [
+    "# Parts",
+    "",
+    "The system parts.",
+    "",
+    "## api",
+    "",
+    "First sentence. Second sentence.",
+    "",
+    "# Relationships",
+    "",
+    "none is shown",
+    "",
+    "# Data",
+    "",
+    "none is shown",
+    "",
+  ].join("\n")
+  const outcome = decideRun(
+    snapshot({
+      publishedDocs: {
+        overview: "# What it does\n\nnone is shown\n\n# Entry points\n\nnone is shown\n",
+        architecture,
+        glossary: "none is shown\n",
+      },
+      files: [{ path: "src/api.ts", text: "export function api() {}" }],
+    }),
+    {
+      sections: [
+        {
+          doc: "architecture",
+          heading: "Parts",
+          body: ["Bills through the API.", "", "## api", "", "The API package."].join("\n"),
+          source: "src/api.ts",
+        },
+      ],
+    },
+  )
+
+  assert.deepEqual(outcome.check, {
+    name: "DocAtlas",
+    state: "green",
+    summary: ["Parts: src/api.ts", "api: src/api.ts"].join("\n"),
+  })
+  assert.equal(outcome.comment, null)
+  assert.equal(
+    outcome.commit?.files[0].text,
+    [
+      "# Parts",
+      "",
+      "Bills through the API.",
+      "",
+      "## api",
+      "",
+      "The API package.",
+      "",
+      "# Relationships",
+      "",
+      "none is shown",
+      "",
+      "# Data",
+      "",
+      "none is shown",
+      "",
+    ].join("\n"),
+  )
+})
+
+test("clearing a section that still has an unsourced subsection leaves that section untouched", () => {
+  const architecture = [
+    "# Parts",
+    "",
+    "The system parts.",
+    "",
+    "## api",
+    "",
+    "The API package.",
+    "",
+    "# Relationships",
+    "",
+    "none is shown",
+    "",
+    "# Data",
+    "",
+    "none is shown",
+    "",
+  ].join("\n")
+  const outcome = decideRun(
+    snapshot({
+      publishedDocs: {
+        overview: "# What it does\n\nnone is shown\n\n# Entry points\n\nnone is shown\n",
+        architecture,
+        glossary: "none is shown\n",
+      },
+      files: [{ path: "src/api.ts", text: "export function api() {}" }],
+    }),
+    {
+      sections: [
+        {
+          doc: "architecture",
+          heading: "Parts",
+          body: "",
+          source: "src/api.ts",
+        },
+      ],
+    },
+  )
+
+  assert.deepEqual(outcome, skipped)
+})
+
+test("a subsection left without a source stays in place", () => {
+  const architecture = [
+    "# Parts",
+    "",
+    "The system parts.",
+    "",
+    "## api",
+    "",
+    "The API package.",
+    "",
+    "## web",
+    "",
+    "The web package.",
+    "",
+    "# Relationships",
+    "",
+    "none is shown",
+    "",
+    "# Data",
+    "",
+    "none is shown",
+    "",
+  ].join("\n")
+  const outcome = decideRun(
+    snapshot({
+      publishedDocs: {
+        overview: "# What it does\n\nnone is shown\n\n# Entry points\n\nnone is shown\n",
+        architecture,
+        glossary: "none is shown\n",
+      },
+      files: [
+        { path: "src/workspace.ts", text: "export const packages = ['api', 'web', 'billing']" },
+        { path: "packages/billing/package.json", text: '{ "name": "billing" }' },
+      ],
+    }),
+    {
+      sections: [
+        {
+          doc: "architecture",
+          heading: "Parts",
+          body: [
+            "The system parts.",
+            "",
+            "## web",
+            "",
+            "The web package.",
+            "",
+            "## billing",
+            "",
+            "The billing package.",
+          ].join("\n"),
+          source: "src/workspace.ts",
+          subsectionSources: [{ heading: "billing", source: "packages/billing/package.json" }],
+        },
+      ],
+    },
+  )
+
+  assert.deepEqual(outcome.check, {
+    name: "DocAtlas",
+    state: "green",
+    summary: "billing: packages/billing/package.json",
+  })
+  assert.equal(
+    outcome.commit?.files[0].text,
+    [
+      "# Parts",
+      "",
+      "The system parts.",
+      "",
+      "## api",
+      "",
+      "The API package.",
+      "",
+      "## web",
+      "",
+      "The web package.",
+      "",
+      "## billing",
+      "",
+      "The billing package.",
+      "",
+      "# Relationships",
+      "",
+      "none is shown",
+      "",
+      "# Data",
+      "",
+      "none is shown",
+      "",
+    ].join("\n"),
+  )
+})
+
+test("each glossary term is its own heading", () => {
+  const outcome = decideRun(
+    snapshot({
+      publishedDocs: {
+        overview: "# What it does\n\nnone is shown\n\n# Entry points\n\nnone is shown\n",
+        architecture: "# Parts\n\nnone is shown\n\n# Relationships\n\nnone is shown\n\n# Data\n\nnone is shown\n",
+        glossary: null,
+      },
+      lessonsFile: "# Call the ledger an account\n\nSay account, not customer segment.\n",
+      files: [{ path: "src/invoice.ts", text: "export class Invoice {}" }],
+    }),
+    {
+      sections: [
+        {
+          doc: "glossary",
+          heading: "Invoice",
+          body: "A bill for an account.",
+          source: "src/invoice.ts",
+        },
+        {
+          doc: "glossary",
+          heading: "Account",
+          body: "The ledger name for a customer. A lesson also calls this customer an account.",
+          source: "Call the ledger an account",
+        },
+      ],
+    },
+  )
+
+  assert.deepEqual(outcome.commit?.files, [
+    {
+      path: "docs/glossary.md",
+      text: [
+        "# Invoice",
+        "",
+        "A bill for an account.",
+        "",
+        "# Account",
+        "",
+        "The ledger name for a customer. A lesson also calls this customer an account.",
+        "",
+      ].join("\n"),
+    },
+  ])
+})
+
+test("top-level headings stay when a proposal renames one and leaves another out", () => {
+  const overview = "# What it does\n\nSends mail.\n\n# Entry points\n\nnode src/main.ts\n"
+  const outcome = decideRun(
+    snapshot({
+      publishedDocs: {
+        overview,
+        architecture: "# Parts\n\nnone is shown\n\n# Relationships\n\nnone is shown\n\n# Data\n\nnone is shown\n",
+        glossary: "none is shown\n",
+      },
+      files: [{ path: "src/billing.ts", text: "export function bill() {}" }],
+    }),
+    {
+      sections: [
+        {
+          doc: "overview",
+          heading: "Purpose",
+          body: "A renamed section.",
+          source: "src/billing.ts",
+        },
+        {
+          doc: "overview",
+          heading: "What it does",
+          body: "Bills the account when an invoice is issued.",
+          source: "src/billing.ts",
+        },
+      ],
+    },
+  )
+
+  assert.equal(
+    outcome.commit?.files[0].text,
+    "# What it does\n\nBills the account when an invoice is issued.\n\n# Entry points\n\nnode src/main.ts\n",
+  )
+})
+
+test("a top-level section with nothing to say states that none is shown", () => {
+  const architecture = [
+    "# Parts",
+    "",
+    "The system parts.",
+    "",
+    "# Relationships",
+    "",
+    "The services call each other.",
+    "",
+    "# Data",
+    "",
+    "The store is a ledger.",
+    "",
+  ].join("\n")
+  const outcome = decideRun(
+    snapshot({
+      publishedDocs: {
+        overview: "# What it does\n\nnone is shown\n\n# Entry points\n\nnone is shown\n",
+        architecture,
+        glossary: "none is shown\n",
+      },
+      files: [{ path: "src/billing.ts", text: "export function bill() {}" }],
+    }),
+    {
+      sections: [
+        {
+          doc: "architecture",
+          heading: "Relationships",
+          body: "   ",
+          source: "src/billing.ts",
+        },
+      ],
+    },
+  )
+
+  assert.equal(
+    outcome.commit?.files[0].text,
+    [
+      "# Parts",
+      "",
+      "The system parts.",
+      "",
+      "# Relationships",
+      "",
+      "none is shown",
+      "",
+      "# Data",
+      "",
+      "The store is a ledger.",
+      "",
+    ].join("\n"),
+  )
+})
+
+test("a refactor proposal that changes no section stays green and commits nothing", () => {
+  const publishedDocs = {
+    overview: "# What it does\n\nSends mail.\n\n# Entry points\n\nnode src/main.ts\n",
+    architecture: "# Parts\n\nnone is shown\n\n# Relationships\n\nnone is shown\n\n# Data\n\nnone is shown\n",
+    glossary: "# Mailer\n\nSends mail.\n",
+  }
+  const repeated = decideRun(snapshot({ publishedDocs, files: [{ path: "src/app.ts", text: "export {}" }] }), {
+    sections: [
+      {
+        doc: "overview",
+        heading: "What it does",
+        body: "Sends mail.",
+        source: "src/app.ts",
+      },
+    ],
+  })
+  const empty = decideRun(snapshot({ publishedDocs }), { sections: [] })
+
+  assert.deepEqual(repeated, skipped)
+  assert.deepEqual(empty, skipped)
+})
+
+test("a draft pull request with a usable proposal does not commit", () => {
+  const outcome = decideRun(
+    snapshot({
+      draft: true,
+      publishedDocs: {
+        overview: "# What it does\n\nSends mail.\n\n# Entry points\n\nnone is shown\n",
+        architecture: null,
+        glossary: null,
+      },
+      files: [{ path: "src/billing.ts", text: "export function bill() {}" }],
+    }),
+    {
+      sections: [
+        {
+          doc: "overview",
+          heading: "What it does",
+          body: "Bills the account.",
+          source: "src/billing.ts",
+        },
+      ],
+    },
+  )
+
+  assert.deepEqual(outcome, skipped)
+})
+
+test("the commit writes published docs at the override paths and leaves an unchanged doc out", () => {
+  const architecture = "# Parts\n\nThe system parts.\n\n# Relationships\n\nnone is shown\n\n# Data\n\nnone is shown\n"
+  const outcome = decideRun(
+    snapshot({
+      overrideFile: ["overview: README.md", "architecture: design/architecture.md", "glossary: design/glossary.md"].join(
+        "\n",
+      ),
+      publishedDocs: { overview: null, architecture, glossary: null },
+      files: [{ path: "src/main.ts", text: "console.log('up')" }],
+    }),
+    {
+      sections: [
+        {
+          doc: "overview",
+          heading: "Entry points",
+          body: "node src/main.ts",
+          source: "src/main.ts",
+        },
+      ],
+    },
+  )
+
+  assert.deepEqual(
+    outcome.commit?.files.map((file) => file.path),
+    ["README.md", "design/glossary.md"],
+  )
+  assert.equal(
+    outcome.commit?.files[0].text,
+    "# What it does\n\nnone is shown\n\n# Entry points\n\nnode src/main.ts\n",
+  )
+  assert.equal(outcome.commit?.files[1].text, "none is shown\n")
 })
 
 test("an override-file change still wakes when ignore would skip that path", () => {
